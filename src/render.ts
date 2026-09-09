@@ -1,115 +1,75 @@
-import { execa } from "execa";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RenderRequest, Segment } from "./types.js";
+import type { RenderRequest, RenderResult, Segment } from "./types.js";
 import { buildSrt } from "./srt.js";
-import { downloadFromStorage, uploadToStorage, upsertOutputStatus } from "./supabase.js";
+import { buildLocalizedAudio, muxAudioOntoVideo, probeDuration } from "./ffmpeg.js";
+import { downloadToFile, uploadFile, upsertOutputStatus } from "./supabase.js";
 import { config } from "./config.js";
+import { log } from "./log.js";
 
-async function probeDuration(file: string): Promise<number> {
-  const { stdout } = await execa("ffprobe", [
-    "-v", "error",
-    "-show_entries", "format=duration",
-    "-of", "default=nk=1:nw=1",
-    file,
-  ]);
-  const dur = parseFloat(stdout.trim());
-  if (!Number.isFinite(dur)) throw new Error(`Konnte Videodauer nicht lesen: ${stdout}`);
-  return dur;
-}
+const CLIP_FETCH_TIMEOUT_MS = 60_000;
 
 async function downloadSegmentAudios(segments: Segment[], dir: string): Promise<string[]> {
   const paths: string[] = [];
   for (let i = 0; i < segments.length; i++) {
-    const res = await fetch(segments[i].audio_url);
+    const res = await fetch(segments[i].audio_url, { signal: AbortSignal.timeout(CLIP_FETCH_TIMEOUT_MS) });
     if (!res.ok) throw new Error(`TTS-Clip ${i} nicht ladbar (HTTP ${res.status})`);
     const buf = Buffer.from(await res.arrayBuffer());
-    const p = join(dir, `seg_${String(i).padStart(4, "0")}.wav`);
+    if (buf.length === 0) throw new Error(`TTS-Clip ${i} ist leer`);
+    // ffmpeg erkennt das Format am Inhalt, die Endung ist egal (wav/mp3/ogg …)
+    const p = join(dir, `seg_${String(i).padStart(4, "0")}.audio`);
     await writeFile(p, buf);
     paths.push(p);
   }
   return paths;
 }
 
-async function buildLocalizedAudio(
-  segments: Segment[],
-  clipPaths: string[],
-  durationSec: number,
-  outWav: string,
-): Promise<void> {
-  const inputs = clipPaths.flatMap((p) => ["-i", p]);
-  const labels: string[] = [];
-  const chains: string[] = [];
-
-  segments.forEach((seg, i) => {
-    const ms = Math.max(0, Math.round(seg.start * 1000));
-    chains.push(`[${i}:a]adelay=${ms}:all=1[a${i}]`);
-    labels.push(`[a${i}]`);
-  });
-
-  let filter: string;
-  if (segments.length === 1) {
-    filter = `${chains[0]};[a0]apad=whole_dur=${durationSec}[out]`;
-  } else {
-    filter =
-      `${chains.join(";")};` +
-      `${labels.join("")}amix=inputs=${segments.length}:normalize=0:dropout_transition=0[mix];` +
-      `[mix]apad=whole_dur=${durationSec}[out]`;
+async function notifyCallback(url: string | undefined, result: RenderResult): Promise<void> {
+  if (!url) return;
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(result),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!res.ok) log.warn("Callback antwortete mit Fehler", { url, status: res.status });
+  } catch (err) {
+    log.warn("Callback nicht erreichbar", { url, error: String(err) });
   }
-
-  await execa("ffmpeg", [
-    "-y",
-    ...inputs,
-    "-filter_complex", filter,
-    "-map", "[out]",
-    "-ac", "2",
-    "-ar", "48000",
-    outWav,
-  ]);
-}
-
-async function muxAudioOntoVideo(videoIn: string, audioIn: string, videoOut: string): Promise<void> {
-  await execa("ffmpeg", [
-    "-y",
-    "-i", videoIn,
-    "-i", audioIn,
-    "-map", "0:v:0",
-    "-map", "1:a:0",
-    "-c:v", "copy",
-    "-c:a", "aac",
-    "-b:a", "192k",
-    videoOut,
-  ]);
 }
 
 export async function processRender(req: RenderRequest): Promise<void> {
   const outputBucket = req.output_bucket ?? config.defaultOutputBucket;
   const workDir = await mkdtemp(join(tmpdir(), `render-${req.lang}-`));
+  const startedAt = Date.now();
+  const ctx = { job_id: req.job_id, lang: req.lang };
+  const ffOpts = { timeout: config.renderTimeoutMs };
 
   try {
     await upsertOutputStatus(req.job_id, req.lang, { status: "rendering", error: null });
+    log.info("Render gestartet", { ...ctx, segments: req.segments.length });
 
-    const videoBuf = await downloadFromStorage(req.source_bucket, req.source_path);
     const videoIn = join(workDir, "source.mp4");
-    await writeFile(videoIn, videoBuf);
+    await downloadToFile(req.source_bucket, req.source_path, videoIn);
 
     const duration = await probeDuration(videoIn);
     const clipPaths = await downloadSegmentAudios(req.segments, workDir);
 
     const audioWav = join(workDir, "localized.wav");
-    await buildLocalizedAudio(req.segments, clipPaths, duration, audioWav);
+    await buildLocalizedAudio(req.segments, clipPaths, duration, audioWav, ffOpts);
 
     const videoOut = join(workDir, "out.mp4");
-    await muxAudioOntoVideo(videoIn, audioWav, videoOut);
+    await muxAudioOntoVideo(videoIn, audioWav, duration, videoOut, ffOpts);
 
     const srtPath = join(workDir, "out.srt");
     await writeFile(srtPath, buildSrt(req.segments), "utf8");
 
     const videoDest = `${req.output_prefix}.mp4`;
     const srtDest = `${req.output_prefix}.srt`;
-    await uploadToStorage(outputBucket, videoDest, videoOut, "video/mp4");
-    await uploadToStorage(outputBucket, srtDest, srtPath, "application/x-subrip");
+    await uploadFile(outputBucket, videoDest, videoOut, "video/mp4");
+    await uploadFile(outputBucket, srtDest, srtPath, "application/x-subrip");
 
     await upsertOutputStatus(req.job_id, req.lang, {
       status: "done",
@@ -118,10 +78,15 @@ export async function processRender(req: RenderRequest): Promise<void> {
       duration_sec: duration,
       error: null,
     });
+    log.info("Render fertig", { ...ctx, duration_sec: duration, took_ms: Date.now() - startedAt });
+    await notifyCallback(req.callback_url, { ...ctx, status: "done", video_path: videoDest, srt_path: srtDest, duration_sec: duration });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await upsertOutputStatus(req.job_id, req.lang, { status: "error", error: message }).catch(() => {});
-    throw err;
+    log.error("Render fehlgeschlagen", { ...ctx, error: message, took_ms: Date.now() - startedAt });
+    await upsertOutputStatus(req.job_id, req.lang, { status: "error", error: message }).catch((e) =>
+      log.error("Fehlerstatus konnte nicht gespeichert werden", { ...ctx, error: String(e) }),
+    );
+    await notifyCallback(req.callback_url, { ...ctx, status: "error", error: message });
   } finally {
     await rm(workDir, { recursive: true, force: true }).catch(() => {});
   }

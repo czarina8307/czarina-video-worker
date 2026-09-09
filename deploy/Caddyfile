@@ -1,0 +1,25 @@
+# Automatisches Let's-Encrypt-Zertifikat für die Domain aus deploy/.env (WORKER_DOMAIN)
+{$WORKER_DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	# Render-Requests sind klein (JSON); grosse Dateien laufen direkt über Supabase Storage
+	request_body {
+		max_size 10MB
+	}
+
+	reverse_proxy worker:8080 {
+		header_up X-Real-IP {remote_host}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

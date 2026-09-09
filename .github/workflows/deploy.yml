@@ -1,0 +1,46 @@
+# Bei jedem Push auf main: Typecheck + Docker-Build als Test, danach per SSH auf dem VPS ausrollen.
+# Benötigte Repository-Secrets (Settings -> Secrets and variables -> Actions):
+#   DEPLOY_HOST      IP oder Hostname des Servers
+#   DEPLOY_USER      z.B. deploy
+#   DEPLOY_SSH_KEY   privater SSH-Key (ed25519), dessen Public-Key in ~deploy/.ssh/authorized_keys liegt
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Docker-Build (Smoke)
+        run: docker build -t czarina-video-worker:ci .
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: SSH-Key einrichten
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts
+      - name: Ausrollen
+        run: |
+          ssh -i ~/.ssh/id_ed25519 "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            'bash /opt/czarina-video-worker/deploy/deploy.sh'

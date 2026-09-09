@@ -1,0 +1,54 @@
+# Produktions-Stack auf dem VPS: Caddy (TLS + Reverse-Proxy) -> worker
+# Start:  cd deploy && docker compose up -d --build
+services:
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: czarina-video-worker:latest
+    container_name: czarina-video-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PORT: "8080"
+    expose:
+      - "8080"
+    # /tmp im RAM-Limit halten: Render-Arbeitsdateien liegen auf einem eigenen Volume
+    volumes:
+      - worker-tmp:/tmp
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    stop_grace_period: 15m   # laufenden Render bei Deploy fertig rechnen lassen
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: czarina-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    env_file: .env          # liefert WORKER_DOMAIN
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - worker
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  worker-tmp:
+  caddy-data:
+  caddy-config:
