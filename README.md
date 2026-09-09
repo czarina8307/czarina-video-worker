@@ -20,6 +20,7 @@ n8n  ──POST /render──▶  Caddy (TLS)  ──▶  Worker (Node + ffmpeg)
 |---------|-----------|-----------------------------------|---------|
 | GET     | `/health` | keine                             | `{ ok, running, pending, concurrency }` |
 | POST    | `/render` | `Authorization: Bearer <WORKER_TOKEN>` | `202` angenommen · `400` Body ungültig · `401` Token falsch · `409` Job/Lang läuft bereits |
+| POST    | `/extract-audio` | `Authorization: Bearer <WORKER_TOKEN>` | synchron `200 { audio_bucket, audio_path, duration_sec, bytes }` – zieht eine kleine Mono-MP3 (16 kHz, 48 kbit/s) aus dem Video für die Whisper-Transkription (25-MB-Limit) |
 
 Der Request wird sofort mit `202` bestätigt; der Render läuft im Hintergrund
 (Warteschlange, standardmässig 1 gleichzeitig). Fortschritt und Ergebnis landen
@@ -47,8 +48,12 @@ Request-Body:
 
 `audio_url` darf wav/mp3/ogg sein (ffmpeg erkennt das Format). Es entstehen
 `<output_prefix>.mp4` und `<output_prefix>.srt`. Clips werden auf `start`
-platziert; Überlappungen werden gemischt, Lücken mit Stille gefüllt, die Tonspur
-wird exakt auf die Videolänge gekappt.
+platziert; ist ein Clip länger als das Fenster bis zum nächsten Segment, wird er
+bis max. 1.35× beschleunigt (atempo), der Rest überlappt und wird gemischt.
+Lücken werden mit Stille gefüllt, die Tonspur wird exakt auf die Videolänge gekappt.
+
+`/extract-audio`-Body: `{ "source_bucket", "source_path", "output_bucket"?, "output_path" }`
+(z.B. `output_path: "jobs/<job_id>/audio.mp3"`).
 
 ## Lokal entwickeln
 

@@ -2,6 +2,7 @@ import express from "express";
 import { timingSafeEqual } from "node:crypto";
 import { config } from "./config.js";
 import { processRender } from "./render.js";
+import { processExtract, type ExtractRequest } from "./extract.js";
 import { RenderQueue } from "./queue.js";
 import { log } from "./log.js";
 import type { RenderRequest, Segment } from "./types.js";
@@ -69,6 +70,23 @@ app.post("/render", (req, res) => {
   }
   log.info("Job angenommen", { job_id: job.job_id, lang: job.lang, ...queue.stats });
   res.status(202).json({ accepted: true, job_id: job.job_id, lang: job.lang, queue: queue.stats });
+});
+
+// Synchron: Tonspur fürs Transkribieren extrahieren (Antwort erst, wenn die Datei im Bucket liegt)
+app.post("/extract-audio", async (req, res) => {
+  const b = (req.body ?? {}) as Record<string, unknown>;
+  if (!isStr(b.source_bucket)) return res.status(400).json({ error: "source_bucket fehlt" });
+  if (!isStr(b.source_path) || !SAFE_PATH.test(b.source_path)) return res.status(400).json({ error: "source_path ungültig" });
+  if (b.output_bucket !== undefined && !isStr(b.output_bucket)) return res.status(400).json({ error: "output_bucket ungültig" });
+  if (!isStr(b.output_path) || !SAFE_PATH.test(b.output_path)) return res.status(400).json({ error: "output_path ungültig" });
+  try {
+    const result = await processExtract(b as unknown as ExtractRequest);
+    res.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error("Audio-Extraktion fehlgeschlagen", { source_path: b.source_path, error: message });
+    res.status(500).json({ error: message });
+  }
 });
 
 app.use((_req, res) => res.status(404).json({ error: "not found" }));

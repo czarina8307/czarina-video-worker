@@ -6,7 +6,7 @@ import { mkdtemp, rm, writeFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execa } from "execa";
-import { buildLocalizedAudio, muxAudioOntoVideo, probeDuration } from "../src/ffmpeg.js";
+import { buildLocalizedAudio, computeTempos, extractAudio, muxAudioOntoVideo, probeDuration, MAX_TEMPO } from "../src/ffmpeg.js";
 import { buildSrt } from "../src/srt.js";
 import type { Segment } from "../src/types.js";
 
@@ -52,6 +52,21 @@ try {
 
   // Einzel-Segment-Pfad (anderer Filtergraph)
   await buildLocalizedAudio([segments[0]], [clip1], duration, join(dir, "single.wav"));
+
+  // Tempo-Anpassung: Clip 2 s in 1.5-s-Fenster -> 1.333; Clip 3 s in 1-s-Fenster -> gekappt auf MAX_TEMPO; passender Clip -> 1
+  const tempos = computeTempos(
+    [{ start: 0, end: 1, text: "", audio_url: "" }, { start: 1.5, end: 2, text: "", audio_url: "" }, { start: 2.5, end: 3, text: "", audio_url: "" }],
+    [2.0, 3.0, 1.0], 10);
+  assert(Math.abs(tempos[0] - 1.3333) < 0.001, `tempo[0] = ${tempos[0]}`);
+  assert(tempos[1] === MAX_TEMPO, `tempo[1] = ${tempos[1]}`);
+  assert(tempos[2] === 1, `tempo[2] = ${tempos[2]}`);
+
+  // Audio-Extraktion fürs Transkribieren
+  const extracted = join(dir, "audio.mp3");
+  await extractAudio(video, extracted);
+  const exDur = await probeDuration(extracted);
+  assert(Math.abs(exDur - duration) < 0.2, `Extrahierte Tonspur ${exDur}s statt ${duration}s`);
+  assert((await stat(extracted)).size < 100_000, "Extrahierte Tonspur zu gross");
 
   const srt = buildSrt(segments);
   await writeFile(join(dir, "out.srt"), srt);
