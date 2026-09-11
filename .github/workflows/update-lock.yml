@@ -1,0 +1,34 @@
+name: update-lock
+
+on:
+  push:
+    branches: [feat/mail-receiver]
+    paths:
+      - package.json
+      - .github/workflows/update-lock.yml
+
+permissions:
+  contents: write
+
+jobs:
+  lockfile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/mail-receiver
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --package-lock-only --ignore-scripts
+      - name: Commit lockfile
+        run: |
+          if git diff --quiet package-lock.json; then
+            echo "package-lock already current"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          git commit -m "chore: update mail receiver lockfile"
+          git push origin HEAD:feat/mail-receiver
