@@ -1,17 +1,19 @@
-# Bei jedem Push auf main: Typecheck + Docker-Build als Test, danach per SSH auf dem VPS ausrollen.
-# Benötigte Repository-Secrets (Settings -> Secrets and variables -> Actions):
+# Bei PRs: Typecheck + Selbsttest + Docker-Build. Auf main danach zusätzlich per SSH ausrollen.
+# Benötigte Repository-Secrets für Deploy auf main:
 #   DEPLOY_HOST      IP oder Hostname des Servers
 #   DEPLOY_USER      z.B. deploy
 #   DEPLOY_SSH_KEY   privater SSH-Key (ed25519), dessen Public-Key in ~deploy/.ssh/authorized_keys liegt
 name: deploy
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: deploy-production
+  group: deploy-production-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -34,7 +36,7 @@ jobs:
   deploy:
     needs: check
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     steps:
       - name: SSH-Key einrichten
         run: |
