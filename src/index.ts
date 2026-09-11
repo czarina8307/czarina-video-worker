@@ -5,6 +5,7 @@ import { processRender } from "./render.js";
 import { processExtract, type ExtractRequest } from "./extract.js";
 import { RenderQueue } from "./queue.js";
 import { log } from "./log.js";
+import { authorizeMailUser, startMailPolling, stopMailPolling, syncMailboxes } from "./mail.js";
 import type { RenderRequest, Segment } from "./types.js";
 
 const app = express();
@@ -16,7 +17,25 @@ const queue = new RenderQueue(config.renderConcurrency);
 
 app.get("/health", (_req, res) => res.json({ ok: true, ...queue.stats }));
 
-// --- Auth: alles ausser /health braucht den Worker-Token -------------------
+// Manueller Mail-Sync aus Czarina. Authentifiziert mit dem eingeloggten
+// Supabase-Benutzer statt mit dem internen Worker-Token.
+app.post("/mail/sync", async (req, res) => {
+  const auth = req.header("authorization") ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!(await authorizeMailUser(token))) return res.status(401).json({ error: "unauthorized" });
+
+  const mailboxId = typeof req.body?.mailbox_id === "string" ? req.body.mailbox_id : null;
+  try {
+    const results = await syncMailboxes(mailboxId);
+    res.json({ ok: true, results });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.error("Manueller Mail-Sync fehlgeschlagen", { mailbox_id: mailboxId, error: message });
+    res.status(500).json({ error: message });
+  }
+});
+
+// --- Auth: restliche Worker-Endpunkte brauchen den Worker-Token ------------
 function tokenMatches(given: string): boolean {
   const a = Buffer.from(given);
   const b = Buffer.from(config.workerToken);
@@ -99,13 +118,15 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
   res.status(500).json({ error: "internal" });
 });
 
-// --- Start + sauberes Herunterfahren ----------------------------------------
+// --- Start + sauberes Herunterfahren --------------------------------------
 const server = app.listen(config.port, () => {
-  log.info("Video-Worker lauscht", { port: config.port, concurrency: config.renderConcurrency });
+  log.info("Czarina-Worker lauscht", { port: config.port, concurrency: config.renderConcurrency });
+  startMailPolling();
 });
 
 async function shutdown(signal: string) {
   log.info("Shutdown", { signal, ...queue.stats });
+  stopMailPolling();
   server.close();
   await queue.drain(config.renderTimeoutMs);
   process.exit(0);

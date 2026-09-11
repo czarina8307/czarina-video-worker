@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Render-Worker: baut lokalisierte Tonspur + Untertitel auf Bildschirmaufnahmen (ffmpeg).",
+  "description": "Render-Worker und Mail-Receiver für Czarina.",
   "engines": {
     "node": ">=22"
   },
@@ -17,7 +17,9 @@
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
     "execa": "^9.3.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "imapflow": "^2.0.0",
+    "postal-mime": "^3.0.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
