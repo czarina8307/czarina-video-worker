@@ -20,4 +20,5 @@ export const config = {
   defaultOutputBucket: process.env.DEFAULT_OUTPUT_BUCKET ?? "video-localization",
   renderConcurrency: optionalInt("RENDER_CONCURRENCY", 1),
   renderTimeoutMs: optionalInt("RENDER_TIMEOUT_SEC", 1800) * 1000,
+  mailPollIntervalMs: optionalInt("MAIL_POLL_INTERVAL_SEC", 60) * 1000,
 };
